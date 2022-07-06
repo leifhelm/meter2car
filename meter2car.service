@@ -1,0 +1,11 @@
+[Unit]
+Descripion=Meter 2 Car
+
+[Service]
+ExecStart=/home/pi/meter2car/meter2car $METER2CAR_URL
+EnvironmentFile=/etc/environment
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,35 @@
+[package]
+name = "meter2car"
+version = "0.1.0"
+edition = "2021"
+
+
+[dependencies]
+rppal = "^0.13"
+json = "^0.12"
+smart_meter = "^0.2"
+hex = "^0.4"
+nom = "^7"
+aes = "^0.8"
+cipher = "^0.4"
+hdlcparse = { path = "../hdlcparse" }
+url = "^2.2"
+serde_json = "^1.0"
+futures = "^0.3"
+
+[dependencies.tokio]
+version = "^1.0"
+features = [ "full" ]
+
+[dependencies.reqwest]
+version = "^0.11"
+features = [ "rustls", "json" ]
+default-features = false
+
+[dependencies.dlms_cosem]
+path = "../dlms-cosem-rs"
+features = [ "std" ]
+
+[dependencies.serialport]
+version = "^4.2"
+default-features = false
