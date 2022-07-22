@@ -1,29 +1,20 @@
 #![deny(missing_debug_implementations)]
-use std::error;
-use std::fmt;
-use std::io;
-use std::io::Read;
-use std::time::Duration;
+use std::{error, fmt, io, time::Duration};
 
 use aes::Aes128;
 use cipher::Key;
-use dlms_cosem::Apdu;
-use dlms_cosem::Data;
-use hdlcparse::Error as HdlcError;
-use hdlcparse::HdlcFrame;
-use reqwest::Client;
-use reqwest::Url;
-use rppal::gpio::Gpio;
-use rppal::gpio::OutputPin;
-use serde_json::Map;
-use serde_json::Value;
+use dlms_cosem::{hdlc::HdlcDataLinkLayer, Apdu, Data, Dlms};
+use reqwest::{Client, Url};
+use rppal::gpio::{Gpio, OutputPin};
+use serde_json::{Map, Value};
 use serialport::{DataBits, Parity, SerialPort, StopBits};
+use smart_meter::SmartMeter;
 
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
     SerialPort(serialport::Error),
-    Dlms(dlms_cosem::Error),
+    SmartMeter(smart_meter::Error),
     Gpio(rppal::gpio::Error),
     UrlError(url::ParseError),
     Reqwest(reqwest::Error),
@@ -37,7 +28,7 @@ impl fmt::Display for Error {
         match self {
             Error::Io(err) => err.fmt(f),
             Error::SerialPort(err) => err.fmt(f),
-            Error::Dlms(err) => err.fmt(f),
+            Error::SmartMeter(err) => err.fmt(f),
             Error::Gpio(err) => err.fmt(f),
             Error::UrlError(err) => err.fmt(f),
             Error::Reqwest(err) => err.fmt(f),
@@ -53,7 +44,7 @@ impl error::Error for Error {
         match self {
             Error::Io(err) => Some(err),
             Error::SerialPort(err) => Some(err),
-            Error::Dlms(err) => Some(err),
+            Error::SmartMeter(err) => Some(err),
             Error::Gpio(err) => Some(err),
             Error::UrlError(err) => Some(err),
             Error::Reqwest(err) => Some(err),
@@ -63,8 +54,7 @@ impl error::Error for Error {
 }
 
 pub struct Meter {
-    reader: Box<dyn SerialPort>,
-    key: Key<Aes128>,
+    smart_meter: SmartMeter<Box<dyn SerialPort>, HdlcDataLinkLayer>,
     buffer: Vec<u8>,
     pin: OutputPin,
 }
@@ -81,66 +71,21 @@ impl Meter {
         let gpio = Gpio::new().map_err(Error::Gpio)?;
         let pin = gpio.get(gpio_pin).map_err(Error::Gpio)?;
         Ok(Meter {
-            reader,
-            key: key.into(),
+            smart_meter: SmartMeter::apdu_iter(reader, Dlms::new(key)),
             buffer: Vec::new(),
             pin: pin.into_output(),
         })
     }
 
     fn read_next(&mut self) -> Result<i32, Error> {
-        let mut bytes_needed = 0;
-
-        let (hdlc_frame, len) = loop {
-            (&mut self.reader)
-                .take(bytes_needed as u64)
-                .read_to_end(&mut self.buffer)
-                .map_err(Error::Io)?;
-
-            let buf = self.buffer.as_slice();
-
-            let hdlc_frame = match HdlcFrame::parse(false, buf) {
-                Ok((next_buffer, hdlc_frame)) => (hdlc_frame, buf.len() - next_buffer.len()),
-                Err(HdlcError::Incomplete(n)) => {
-                    bytes_needed = n.map(|b| b.get()).unwrap_or(1);
-                    continue;
-                }
-                Err(HdlcError::InvalidStartCharacter) => {
-                    self.buffer.remove(0);
-                    bytes_needed = 0;
-                    continue;
-                }
-                Err(
-                    HdlcError::InvalidFormat
-                    | HdlcError::InvalidChecksum
-                    | HdlcError::InvalidAddress
-                    | HdlcError::InvalidLlcHeader,
-                ) => {
-                    // Input is invalid but not incomplete,
-                    // so try advancing the buffer.
-                    self.buffer.remove(0);
-                    bytes_needed = 0;
-                    continue;
-                }
-            };
-
-            break hdlc_frame;
-        };
-        let apdu =
-            Apdu::parse_encrypted(hdlc_frame.information, &self.key.into()).map(|(_, apdu)| apdu);
-        self.buffer.drain(0..len);
-        let apdu = apdu
-            .map_err(|err| match err {
-                nom::Err::Incomplete(needed) => dlms_cosem::Error::Incomplete(match needed {
-                    nom::Needed::Unknown => None,
-                    nom::Needed::Size(size) => Some(size),
-                }),
-                nom::Err::Error(err) | nom::Err::Failure(err) => err,
-            })
-            .map_err(Error::Dlms)?;
+        let apdu = self
+            .smart_meter
+            .next()
+            .unwrap()
+            .map_err(Error::SmartMeter)?;
 
         let data = match &apdu {
-            Apdu::DataNotification(data) => data.get_body(),
+            Apdu::DataNotification(data) => data.body(),
             _ => Err(Error::InvalidApduFormat)?,
         };
         let data = match data {
@@ -162,9 +107,11 @@ impl Meter {
         let available_power = data[5] as i32 - data[4] as i32;
         Ok(available_power)
     }
+
     pub fn available_power(&mut self) -> Result<i32, Error> {
         self.buffer.clear();
-        self.reader
+        self.smart_meter
+            .reader()
             .clear(serialport::ClearBuffer::Input)
             .map_err(Error::SerialPort)?;
         self.pin.set_high();
@@ -177,7 +124,6 @@ impl Meter {
 impl fmt::Debug for Meter {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Meter")
-            .field("key", &self.key)
             .field("buffer", &self.buffer)
             .field("pin", &self.pin)
             .finish()
